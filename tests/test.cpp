@@ -4,7 +4,12 @@
 #include "../cr.h"
 #include "test_data.h"
 
-#if defined(CR_PLATFORM_WIN) || defined(CR_PLATFORM_LINUX)
+#if defined(CR_WINDOWS) || defined(CR_LINUX)
+#if defined(_MSC_VER)
+// avoid experimental/filesystem deprecation #error on MSVC >= 16.3 since we're
+// not using C++17 explicitly.
+#define _SILENCE_EXPERIMENTAL_FILESYSTEM_DEPRECATION_WARNING
+#endif
 #include <experimental/filesystem>
 namespace fs = std::experimental::filesystem;
 
@@ -22,6 +27,17 @@ void touch(const char *filename) {
 }
 #endif
 
+void delete_old_files(cr_plugin &ctx, unsigned int max_version) {
+    auto p = (cr_internal *)ctx.p;
+    const auto file = p->fullname;
+    for (unsigned int i = 0; i < max_version; i++) {
+        cr_del(cr_version_path(file, i, p->temppath));
+#if defined(_MSC_VER)
+        cr_del(cr_replace_extension(cr_version_path(file, i, p->temppath), ".pdb"));
+#endif
+    }
+}
+
 TEST(crTest, basic_flow) {
     const char *bin = CR_DEPLOY_PATH "/" CR_PLUGIN("test_basic");
 
@@ -30,7 +46,7 @@ TEST(crTest, basic_flow) {
     test_data data;
     ctx.userdata = &data;
     // version 1
-    EXPECT_EQ(true, cr_plugin_load(ctx, bin));
+    EXPECT_EQ(true, cr_plugin_open(ctx, bin));
 
     data.test = test_id::return_version;
     EXPECT_EQ(1, cr_plugin_update(ctx));
@@ -104,12 +120,12 @@ TEST(crTest, basic_flow) {
     EXPECT_EQ(0, cr_plugin_update(ctx));
 
     // recompile code
-    // a new version 2, hopefuly with the bug fixed!
+    // a new version 3, hopefuly with the bug fixed!
     touch(bin);
 
     // should be a new version
     data.test = test_id::return_version;
-    EXPECT_EQ(2, cr_plugin_update(ctx));
+    EXPECT_EQ(3, cr_plugin_update(ctx));
 
     // test our allocated data is still good
     data.test = test_id::heap_data_alloc;
@@ -129,34 +145,34 @@ TEST(crTest, basic_flow) {
     EXPECT_EQ(0, cr_plugin_update(ctx));
 
     // recompile code
-    // version 3
+    // version 4
     touch(bin);
 
     // makes it crash during load
     // crash handler automatically decrements the version
     data.test = test_id::crash_load;
     EXPECT_EQ(-2, cr_plugin_update(ctx));
-    EXPECT_EQ((unsigned int)2, ctx.version);
+    EXPECT_EQ((unsigned int)3, ctx.version);
     EXPECT_EQ(CR_SEGFAULT, ctx.failure);
 
-    // load crashed, so it should be at version 2
+    // load crashed, so it should be at version 3
     data.test = test_id::return_version;
-    EXPECT_EQ(2, cr_plugin_update(ctx));
+    EXPECT_EQ(3, cr_plugin_update(ctx));
 
     // recompile code
-    // a new version 3 retry
+    // a new version 5 retry
     touch(bin);
 
     // force crash on unload
-    // but now the bug moved and crashed again, we're back to version 1
+    // but now the bug moved and crashed again, we're back to version 2
     data.test = test_id::crash_unload;
     EXPECT_EQ(-2, cr_plugin_update(ctx));
-    EXPECT_EQ((unsigned int)1, ctx.version);
+    EXPECT_EQ((unsigned int)2, ctx.version);
     EXPECT_EQ(CR_SEGFAULT, ctx.failure);
 
     // unload crashed, next update should do a rollback
     data.test = test_id::return_version;
-    EXPECT_EQ(1, cr_plugin_update(ctx));
+    EXPECT_EQ(2, cr_plugin_update(ctx));
 
     // modify states
     data.test = test_id::static_local_state_int;
@@ -164,6 +180,9 @@ TEST(crTest, basic_flow) {
 
     data.test = test_id::static_global_state_int;
     EXPECT_EQ(saved_global_static + 3, cr_plugin_update(ctx));
+
+    // Cleanup old version
+    delete_old_files(ctx, ctx.next_version);
 
     cr_plugin_close(ctx);
     EXPECT_EQ(ctx.p, nullptr);
